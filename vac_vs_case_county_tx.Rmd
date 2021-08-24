@@ -1,0 +1,196 @@
+---
+title: "Caes vs Vaccination Rate by Texas County"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(readxl)
+library(janitor)
+library(scales)
+library(openxlsx)
+library(lubridate)
+library(gganimate)
+library(transformr)
+```
+
+
+## Create chart of vaccination vs case rate by Texas County
+
+# First get the data
+Case and current vac data from dshs.texas.gov/
+Archived dshs.texas.gov/ from @rdmurphy
+Pop data from Texas state demographer
+
+```{r data_in}
+
+texas_county_pops = read_csv("https://demographics.texas.gov/Resources/TPEPP/Estimates/2019/2019_txpopest_county.csv")  %>% 
+  clean_names() %>%
+  remove_empty(c("rows", "cols")) %>%
+  select(fips, county, jan1_2020_pop_est)
+
+texas_county_cases_wide= read.xlsx("https://dshs.texas.gov/coronavirus/TexasCOVID-19ActiveCaseDatabyCounty.xlsx",sheet=1, startRow = 3)  %>% 
+  clean_names() %>%
+  remove_empty(c("rows", "cols")) %>%
+  mutate_at(vars(starts_with("active")), as.numeric)  %>%
+    inner_join(texas_county_pops)    %>%
+  mutate( across(starts_with("active"),
+           .fns = ~./jan1_2020_pop_est)) %>%
+  select(-notes)
+
+
+texas_county_cases <- texas_county_cases_wide %>%
+  pivot_longer(
+   cols = starts_with("active_cases_"),
+   names_to = "week",
+   names_prefix = "active_cases_",
+   values_to = "active_cases",
+   values_drop_na = TRUE
+ ) %>%
+  mutate(as_of_date = if_else(substr(week,1,2) =="12",                                         paste0(2020,substr(week,1,2),substr(week,4,5)),
+        paste0(2021,substr(week,1,2),substr(week,4,5)))
+        )
+
+texas_county_vac = read.xlsx("https://dshs.texas.gov/immunize/covid19/COVID-19-Vaccine-Data-by-County.xls",sheet=2, startRow = 1)  %>% 
+  clean_names() %>%
+    rename(county = county_name) %>%
+        inner_join(texas_county_pops)    %>%
+    mutate(percent_fully_vaccinated = as.numeric(people_fully_vaccinated)/jan1_2020_pop_est) %>%
+  mutate(as_of_date = last(texas_county_cases$as_of_date)) %>%
+#      mutate(as_of_date =  gsub("-","",Sys.Date()) ) %>%
+  remove_empty(c("rows", "cols")) %>%
+        select(county, percent_fully_vaccinated, as_of_date)
+
+
+# this was getting the archived data from achive.org, but there wasn't enough
+# archive_links <- read_lines("http://web.archive.org/cdx/search/cdx?url=https://dshs.texas.gov/immunize/covid19/COVID-19-Vaccine-Data-by-County.xls*&output=txt") %>%
+#     as_tibble() %>%
+#   separate(col = 1, into = c("v1","date_time_code","v3","v4","v5","v6", "v7"), sep =  " ") %>%
+#   mutate(date_code = substr(date_time_code, 1, 8)) %>%
+#   group_by(date_code) |>
+#   slice(1) |>
+#   ungroup()
+
+
+date_time_codes <- texas_county_cases %>%
+  select(as_of_date) %>%
+  group_by(as_of_date) %>%
+  filter(substr(as_of_date,1,4) ==2021 ) %>%
+  slice(1) %>% 
+  ungroup() %>%
+  head(-1)  # last day not always available, but was already gotten anyways
+
+#texas_county_vac <- NULL
+
+  
+for (place in 1:nrow(date_time_codes))  {
+ # place <- 1 
+  i = paste0(date_time_codes[place,])
+  print(i)
+  Sys.sleep(.1) # play nice
+  try(texas_county_vac_i <-  read_csv(paste0("https://raw.githubusercontent.com/rdmurphy/tx-covid-vaccine-data/main/distribution/snapshots/",substr(i, 1, 4),"-",substr(i, 5, 6),"-",substr(i, 7, 8),".csv"))  %>% 
+  clean_names() %>%
+  remove_empty(c("rows", "cols")) %>%
+  rename(county = county_name) %>%
+        inner_join(texas_county_pops)    %>%
+    mutate(percent_fully_vaccinated = as.numeric(people_fully_vaccinated)/jan1_2020_pop_est) %>%   
+        select(county, percent_fully_vaccinated) %>%
+    mutate(as_of_date =  substr(i, 1, 8) ) %>%
+  drop_na(county) )
+  
+  try(texas_county_vac <- bind_rows(texas_county_vac , texas_county_vac_i)  )  
+ rm( texas_county_vac_i )
+}
+
+saveRDS(texas_county_vac, "texas_county_vac.rds")
+
+data_merged <- texas_county_cases %>% 
+  inner_join(texas_county_vac)    %>%
+  drop_na(county)
+
+ 
+```
+
+
+
+```{r , echo=FALSE}
+
+# filter and clean data for plot
+data_plot   <- data_merged %>%
+    filter(jan1_2020_pop_est > 500000)  %>%
+  mutate(as_of_date = as.numeric(as_of_date))%>%
+    filter(as_of_date > 20210702)  %>%
+    mutate(as_of_date_format = ymd(as_of_date)) %>%
+  arrange(as_of_date_format) %>%
+  mutate(county_label = if_else(substr(as_of_date,8,8) !=2,
+                                county, ""))
+  
+# Make a ggplot, but add frame=snapshot: one image per day
+
+p <- ggplot(data = data_plot, 
+    aes(y=active_cases , x= percent_fully_vaccinated, size=as.numeric(jan1_2020_pop_est)))+
+    geom_point() +
+    scale_y_continuous(labels=percent)+
+    scale_x_continuous(labels=percent) +
+  scale_size_continuous(labels=comma)+ 
+  theme_classic()+
+  labs(
+    title = "COVID Cases vs Vaccination Rates  in Large Texas Counties",
+    subtitle = "Active Cases and Vaccinations as of: {frame_time}",
+    caption = "Data from https://dshs.texas.gov/coronavirus/AdditionalData.aspx, some via @rdmurphy",
+    x = "full vaccinations per capita",
+    y = "active cases per capita",
+    size = "population"
+  )   +
+  geom_text(aes(label=county_label),hjust=.5, vjust=-1) +
+  transition_time(as_of_date_format) +
+  ease_aes('linear') + 
+  geom_smooth(method = "lm", formula = y ~ x) 
+
+# Print the gif 
+animate(p,start_pause = 20, end_pause = 60)
+
+```
+save the gif
+```{r , echo=FALSE}
+
+# Save at gif:
+anim_save("first_saved_animation.gif")
+
+# proposed alt text:  "moving x-y chart with trend line showing higher case increase in lower vaccinated Texas counties"
+```
+
+
+##  Plot
+
+```{r , echo=FALSE}
+
+q <- ggplot(data = filter(data_plot, as_of_date == "20210823"), 
+    aes(y=active_cases , x= percent_fully_vaccinated, size=as.numeric(jan1_2020_pop_est)))+
+    geom_point() +
+    scale_y_continuous(labels=percent)+
+    scale_x_continuous(labels=percent) +
+  scale_size_continuous(labels=comma)+ 
+  theme_classic()+
+  labs(
+    title = "COVID Cases vs Vaccination Rates  in Large Texas Counties",
+    subtitle = "Active Cases and Vaccinations as of August 23, 2021",
+    caption = "Data from https://dshs.texas.gov/coronavirus/AdditionalData.aspx.",
+    x = "full vaccinations per capita",
+    y = "active cases per capita",
+    size = "population"
+  )   +
+  geom_text(aes(label=county),hjust=.5, vjust=-1) + 
+  geom_smooth(method = "lm", formula = y ~ x) 
+
+# Print the plot 
+q
+
+```
+```{r , echo=FALSE}
+
+ggsave( "Texas_County_vac_vs_Cases.png",q, dpi = 600)
+# proposed alt text:  "x-y chart with trend line showing higher case increase in lower vaccinated Texas counties"
+```
+
