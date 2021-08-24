@@ -156,7 +156,7 @@ save the gif
 ```{r , echo=FALSE}
 
 # Save at gif:
-anim_save("first_saved_animation.gif")
+anim_save("Texas_County_vac_vs_Cases.gif")
 
 # proposed alt text:  "moving x-y chart with trend line showing higher case increase in lower vaccinated Texas counties"
 ```
